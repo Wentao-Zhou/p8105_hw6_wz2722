@@ -1,0 +1,235 @@
+---
+title: "hw6_wz2722"
+author: "wentao zhou"
+date: "2024-12-02"
+output: html_document
+---
+
+Problem 2.
+Part 1.Data Cleaning 
+```{r}
+library(dplyr)
+library(readr)
+
+homicides <- read_csv("homicide-data 2.csv")
+homicides <- homicides %>%
+  mutate(city_state = paste(city, state, sep = ", ")) %>%
+  mutate(solved_binary = ifelse(disposition == "Closed by arrest", 1, 0)) %>%
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black")
+  ) %>%
+  mutate(
+    victim_age = suppressWarnings(as.numeric(victim_age)) # Convert to numeric, suppress warnings
+  )
+
+# Check problematic rows where victim_age is NA after conversion
+problematic_rows <- homicides %>% filter(is.na(victim_age))
+print(problematic_rows)
+
+```
+Part 2. Logistic Regression 
+```{r}
+library(tidyr)
+
+#1.Logistic Regression for Baltimore, MD
+ baltimore_data <- homicides %>%
+   filter(city_state == "Baltimore, MD")
+ library(broom)
+ 
+ baltimore_glm <- glm(solved_binary ~ victim_age + victim_sex + victim_race,
+                      data = baltimore_data, family = binomial)
+ 
+ # Summarize results
+ baltimore_results <- tidy(baltimore_glm, conf.int = TRUE, exponentiate = TRUE)
+ or_male_vs_female <- baltimore_results %>%
+   filter(term == "victim_sexMale") %>%
+   select(estimate, conf.low, conf.high)
+ 
+ #2.Logistic Regression for All Cities
+ library(purrr)
+ 
+ city_models <- homicides %>%
+   group_by(city_state) %>%
+   nest() %>%
+   mutate(
+     model = map(data, ~ glm(solved_binary ~ victim_age + victim_sex + victim_race,
+                             data = ., family = binomial)),
+     tidy_model = map(model, ~ tidy(., conf.int = TRUE, exponentiate = TRUE))
+ )
+ or_results <- city_models %>%
+   mutate(or_male_vs_female = map(tidy_model, ~ filter(., term == "victim_sexMale"))) %>%
+   select(city_state, or_male_vs_female) %>%
+   unnest(cols = or_male_vs_female) %>%
+  select(city_state, estimate, conf.low, conf.high)
+ print(or_results)
+```
+
+
+Part 3.Plot the Estimated ORs and CIs
+```{r}
+or_results <- or_results %>%
+  arrange(estimate) %>%
+  mutate(city_state = factor(city_state, levels = city_state))
+library(ggplot2)
+
+ggplot(or_results, aes(x = city_state, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange() +
+  coord_flip() +
+  labs(title = "Adjusted Odds Ratios for Solving Homicides by City",
+       x = "City",
+       y = "Adjusted Odds Ratio (Male vs Female)") +
+  theme_minimal()
+
+```
+Visual Trends:
+
+Cities with higher OR indicate that homicide cases involving male victims are more likely to be solved than those involving female victims.
+
+Cities with OR values close to 1 indicate that there is no significant difference between male and female victims in solving murder cases.
+Confidence interval:
+
+A wider confidence interval indicates greater uncertainty in the estimation, usually due to a smaller sample size.
+If the CI exceeds 1, the impact is not statistically significant.
+
+------
+Problem 3.
+
+Part 1.Load and Clean the Data
+```{r}
+library(tidyverse)
+
+birthweight <- read_csv("birthweight.csv")
+
+# Inspect the data
+str(birthweight)
+summary(birthweight)
+
+birthweight <- birthweight %>%
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    frace = factor(frace),
+    mrace = factor(mrace)
+  )
+colSums(is.na(birthweight))
+birthweight <- birthweight %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+birthweight <- birthweight %>% drop_na()
+
+
+```
+
+Part 2.Regression Model for Birthweight
+```{r}
+library(broom)
+library(modelr)
+
+# Fit the model
+hypothesized_model <- lm(bwt ~ momage + ppbmi + wtgain + smoken + gaweeks + bhead + blength + babysex + gaweeks:babysex, data = birthweight)
+
+# Summarize the model
+summary(hypothesized_model)
+# Add predictions and residuals
+birthweight <- birthweight %>%
+  add_predictions(hypothesized_model, var = "fitted") %>%
+  add_residuals(hypothesized_model, var = "residuals")
+
+# Plot
+ggplot(birthweight, aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals") +
+  theme_minimal()
+
+```
+
+Part 3. Compare the Hypothesized Model to Two Others
+Model 1: Length and Gestational Age
+Model 2: Head Circumference, Length, Sex, and Interactions
+```{r}
+library(tidyverse)
+library(rsample)
+library(purrr)
+
+# Define models 
+model1 <- lm(bwt ~ blength + gaweeks, data = birthweight)
+model2 <- lm(bwt ~ bhead * blength * babysex, data = birthweight)
+
+# Create Monte Carlo cross-validation splits
+set.seed(123)
+cv_splits <- vfold_cv(birthweight, v = 10, repeats = 10)  # 10-fold CV with 10 repeats
+
+# Define a function to calculate Mean Squared Error (MSE)
+calc_mse <- function(model, data) {
+  preds <- predict(model, newdata = data)
+  mean((data$bwt - preds)^2, na.rm = TRUE)
+}
+
+# Cross-Validation for Each Model
+cv_results <- cv_splits %>%
+  mutate(
+    hypothesized_mse = map_dbl(splits, ~ {
+      train_data <- analysis(.x)  # Extract training data
+      test_data <- assessment(.x)  # Extract testing data
+      model <- lm(bwt ~ momage + ppbmi + wtgain + smoken + gaweeks + 
+                    bhead + blength + babysex + gaweeks:babysex, data = train_data)
+      calc_mse(model, test_data)
+    }),
+    model1_mse = map_dbl(splits, ~ {
+      train_data <- analysis(.x)
+      test_data <- assessment(.x)
+      model <- lm(bwt ~ blength + gaweeks, data = train_data)
+      calc_mse(model, test_data)
+    }),
+    model2_mse = map_dbl(splits, ~ {
+      train_data <- analysis(.x)
+      test_data <- assessment(.x)
+      model <- lm(bwt ~ bhead * blength * babysex, data = train_data)
+      calc_mse(model, test_data)
+    })
+  )
+
+# Summarize MSE for each model
+mse_summary <- cv_results %>%
+  summarize(
+    hypothesized = mean(hypothesized_mse, na.rm = TRUE),
+    model1 = mean(model1_mse, na.rm = TRUE),
+    model2 = mean(model2_mse, na.rm = TRUE)
+  )
+
+print(mse_summary)
+
+# Visualize MSE Distributions
+cv_long <- cv_results %>%
+  pivot_longer(cols = ends_with("_mse"), names_to = "model", values_to = "mse") %>%
+  mutate(model = recode(model,
+                        "hypothesized_mse" = "Hypothesized Model",
+                        "model1_mse" = "Model 1: Length + Gestational Age",
+                        "model2_mse" = "Model 2: Head, Length, Sex + Interactions"))
+
+ggplot(cv_long, aes(x = model, y = mse, fill = model)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Cross-Validated Prediction Error by Model",
+       x = "Model",
+       y = "Mean Squared Error") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Interpretation
+1.Model Fit:
+Compare the adjusted R^2 and significant predictors for each model.
+Evaluate residual plots for patterns or heteroscedasticity.
+
+2.Cross-Validation:
+The model with the lowest average MSE across folds has better predictive performance.
+
+3.Tradeoffs:
+Simpler models (e.g., Model 1) may generalize better but miss important relationships.
+
+Complex models (e.g., Model 2) might overfit, particularly with interaction terms.
+
+
+
