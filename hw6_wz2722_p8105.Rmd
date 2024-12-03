@@ -2,7 +2,7 @@
 title: "hw6_wz2722"
 author: "wentao zhou"
 date: "2024-12-02"
-output: html_document
+output: github_document
 ---
 
 Problem 2.
